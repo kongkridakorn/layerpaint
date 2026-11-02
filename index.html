@@ -1,4 +1,4 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="LayerPaint: print any picture as stacked colour layers on a 3D lid, with a slicer preview, filament estimate and 3MF/STL export.">
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="LayerPaint: print any picture as stacked colour layers on a 3D model, with a slicer preview, filament estimate and 3MF/STL export.">
 <meta property="og:title" content="LayerPaint">
 <meta property="og:description" content="Turn any picture into multi-colour layers for 3D printing, with slicer preview and filament estimate.">
 <title>LayerPaint</title>
@@ -244,16 +244,16 @@ select { font-family: var(--font-body); }
       <details class="sec" open>
         <summary><span class="n">1</span>Model</summary>
         <div class="body">
-          <p class="info" id="lidInfo">No model yet. Choose an STL file to begin.</p>
+          <p class="info" id="lidInfo">No model yet. Choose a 3D model file (STL, OBJ, 3MF or PLY) to begin.</p>
           <div class="btns">
-            <label class="btn file">Choose STL file<input class="sr" type="file" id="lidFile" accept=".stl,model/stl"></label>
+            <label class="btn file">Choose 3D model file<input class="sr" type="file" id="lidFile" accept=".stl,.obj,.3mf,.ply,model/stl,model/obj,model/3mf"></label>
           </div>
           <div class="row2" id="faceRow" hidden>
             <label class="lbl" for="face">Print the picture on</label>
             <select id="face"><option value="top">Top face (faces up)</option><option value="bottom">Bottom face (faces down)</option></select>
           </div>
           <p class="note" id="faceNote"></p>
-          <p class="note">The picture goes on the largest flat face of the model. If it has both a top and a bottom face, you can choose which.</p>
+          <p class="note">Works with STL, OBJ, 3MF and PLY files. The picture goes on the largest flat face of the model. If the model lies on its side it is turned upright automatically, and if it has both a top and a bottom face you can choose which.</p>
         </div>
       </details>
 
@@ -3018,11 +3018,140 @@ if (typeof module !== 'undefined') module.exports = LP;
     ctx.drawImage(t, 0, 0, w, hh);
   }
 
+  /* ---------- 3D model readers: every format becomes a flat list of triangles (9 numbers each) ---------- */
+  function parseOBJ(txt) {
+    const V = [], out = [];
+    const lines = txt.split(/\r?\n/);
+    for (const ln of lines) {
+      if (ln.charCodeAt(0) === 118 && ln.charCodeAt(1) === 32) { const t = ln.trim().split(/\s+/); V.push(+t[1], +t[2], +t[3]); }
+      else if (ln.charCodeAt(0) === 102 && ln.charCodeAt(1) === 32) {
+        const ids = ln.trim().split(/\s+/).slice(1).map((w) => { let k = parseInt(w, 10); k = k < 0 ? V.length / 3 + k : k - 1; return k; });
+        for (let i = 1; i + 1 < ids.length; i++) [ids[0], ids[i], ids[i + 1]].forEach((k) => out.push(V[k * 3], V[k * 3 + 1], V[k * 3 + 2]));
+      }
+    }
+    if (!out.length || out.some((v) => v == null || isNaN(v))) throw new Error('This OBJ file has no usable triangles.');
+    return Float32Array.from(out);
+  }
+  function parsePLY(buf) {
+    const bytes = new Uint8Array(buf);
+    let end = -1;
+    for (let i = 0; i < Math.min(bytes.length, 20000); i++) if (bytes[i] === 10 && String.fromCharCode(...bytes.slice(Math.max(0, i - 10), i)).includes('end_header')) { end = i + 1; break; }
+    if (end < 0) throw new Error('This PLY file has no header.');
+    const head = new TextDecoder().decode(bytes.slice(0, end)).split(/\r?\n/);
+    let fmt = 'ascii'; const els = [];
+    head.forEach((l) => {
+      const t = l.trim().split(/\s+/);
+      if (t[0] === 'format') fmt = t[1];
+      else if (t[0] === 'element') els.push({ name: t[1], n: +t[2], props: [] });
+      else if (t[0] === 'property' && els.length) els[els.length - 1].props.push(t[1] === 'list' ? { list: true, ct: t[2], it: t[3], name: t[4] } : { type: t[1], name: t[2] });
+    });
+    const SZ = { char: 1, int8: 1, uchar: 1, uint8: 1, short: 2, int16: 2, ushort: 2, uint16: 2, int: 4, int32: 4, uint: 4, uint32: 4, float: 4, float32: 4, double: 8, float64: 8 };
+    const le = fmt !== 'binary_big_endian', dv = new DataView(buf);
+    let pos = end, tok = null, ti = 0;
+    if (fmt === 'ascii') tok = new TextDecoder().decode(bytes.slice(end)).split(/\s+/).filter(Boolean);
+    const rd = (type) => {
+      if (tok) return +tok[ti++];
+      let v;
+      switch (type) {
+        case 'char': case 'int8': v = dv.getInt8(pos); break;
+        case 'uchar': case 'uint8': v = dv.getUint8(pos); break;
+        case 'short': case 'int16': v = dv.getInt16(pos, le); break;
+        case 'ushort': case 'uint16': v = dv.getUint16(pos, le); break;
+        case 'int': case 'int32': v = dv.getInt32(pos, le); break;
+        case 'uint': case 'uint32': v = dv.getUint32(pos, le); break;
+        case 'float': case 'float32': v = dv.getFloat32(pos, le); break;
+        default: v = dv.getFloat64(pos, le);
+      }
+      pos += SZ[type] || 4; return v;
+    };
+    const V = [], out = [];
+    for (const el of els) {
+      for (let i = 0; i < el.n; i++) {
+        const row = {}, lists = [];
+        for (const pr of el.props) {
+          if (pr.list) { const c = rd(pr.ct), a = []; for (let k = 0; k < c; k++) a.push(rd(pr.it)); lists.push(a); }
+          else row[pr.name] = rd(pr.type);
+        }
+        if (el.name === 'vertex') V.push(row.x, row.y, row.z);
+        else if (el.name === 'face' && lists[0]) {
+          const f = lists[0];
+          for (let k = 1; k + 1 < f.length; k++) [f[0], f[k], f[k + 1]].forEach((q) => out.push(V[q * 3], V[q * 3 + 1], V[q * 3 + 2]));
+        }
+      }
+    }
+    if (!out.length) throw new Error('This PLY file has no triangles (point clouds cannot be used).');
+    return Float32Array.from(out);
+  }
+  async function parse3MF(buf) {
+    const zip = await JSZip.loadAsync(buf);
+    const names = Object.keys(zip.files).filter((n) => /\.model$/i.test(n));
+    if (!names.length) throw new Error('This 3MF file has no model inside.');
+    names.sort((a, b) => (zip.files[b]._data ? zip.files[b]._data.uncompressedSize : 0) - (zip.files[a]._data ? zip.files[a]._data.uncompressedSize : 0));
+    const doc = new DOMParser().parseFromString(await zip.file(names[0]).async('string'), 'application/xml');
+    const NS = (el, n) => Array.from(el.getElementsByTagNameNS('*', n));
+    const objs = {};
+    NS(doc, 'object').forEach((o) => {
+      const mesh = NS(o, 'mesh')[0], rec = { comps: [] };
+      if (mesh) {
+        rec.V = NS(mesh, 'vertex').map((v) => [+v.getAttribute('x'), +v.getAttribute('y'), +v.getAttribute('z')]);
+        rec.T = NS(mesh, 'triangle').map((t) => [+t.getAttribute('v1'), +t.getAttribute('v2'), +t.getAttribute('v3')]);
+      }
+      NS(o, 'component').forEach((c) => rec.comps.push({ id: c.getAttribute('objectid'), m: c.getAttribute('transform') }));
+      objs[o.getAttribute('id')] = rec;
+    });
+    const mat = (t) => { const a = t ? t.trim().split(/\s+/).map(Number) : [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]; return a.length === 12 ? a : [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]; };
+    const mul = (a, b) => {   // row-vector convention: apply a, then b
+      const r = [];
+      for (let i = 0; i < 4; i++) for (let j = 0; j < 3; j++) {
+        const ai = i < 3 ? [a[i * 3], a[i * 3 + 1], a[i * 3 + 2], 0] : [a[9], a[10], a[11], 1];
+        r.push(ai[0] * b[j] + ai[1] * b[3 + j] + ai[2] * b[6 + j] + ai[3] * b[9 + j]);
+      }
+      return r;
+    };
+    const out = [];
+    const emit = (id, m, depth) => {
+      const o = objs[id]; if (!o || depth > 8) return;
+      if (o.V) o.T.forEach((t) => t.forEach((k) => { const v = o.V[k]; out.push(v[0] * m[0] + v[1] * m[3] + v[2] * m[6] + m[9], v[0] * m[1] + v[1] * m[4] + v[2] * m[7] + m[10], v[0] * m[2] + v[1] * m[5] + v[2] * m[8] + m[11]); }));
+      o.comps.forEach((c) => emit(c.id, mul(mat(c.m), m), depth + 1));
+    };
+    const items = NS(doc, 'item');
+    if (items.length) items.forEach((it) => emit(it.getAttribute('objectid'), mat(it.getAttribute('transform')), 0));
+    else Object.keys(objs).forEach((id) => emit(id, mat(null), 0));
+    if (!out.length) throw new Error('This 3MF file has no mesh data.');
+    return Float32Array.from(out);
+  }
+  async function readModel(file) {
+    const buf = await file.arrayBuffer(), ext = (file.name.split('.').pop() || '').toLowerCase();
+    const head = new Uint8Array(buf.slice(0, 4));
+    const isZip = head[0] === 0x50 && head[1] === 0x4b;
+    if (ext === '3mf' || isZip) return parse3MF(buf);
+    const auto = (t) => { t.autoUp = true; return t; };   // OBJ and PLY files do not agree on which way is up
+    if (ext === 'ply' || String.fromCharCode(...head.slice(0, 3)) === 'ply') return auto(parsePLY(buf));
+    if (ext === 'obj') return auto(parseOBJ(new TextDecoder().decode(buf)));
+    try { return LP.parseSTL(buf); } catch (e) { return auto(parseOBJ(new TextDecoder().decode(buf))); }
+  }
+  // turns the model so a different axis points up (cyclic, so it never mirrors the model)
+  const spin = (tris, k) => { const o = new Float32Array(tris.length); for (let i = 0; i < tris.length; i += 3) { if (k === 1) { o[i] = tris[i + 2]; o[i + 1] = tris[i]; o[i + 2] = tris[i + 1]; } else { o[i] = tris[i + 1]; o[i + 1] = tris[i + 2]; o[i + 2] = tris[i]; } } return o; };
+
   /* ---------- loading ---------- */
   function setLid(tris, name, face) {
+    let a = LP.analyzeLid(tris, face || 'auto');
+    if (tris.autoUp) {   // pick the upright direction that gives the biggest flat face
+      let best = null;
+      [0, 1, 2].forEach((k) => {
+        const t2 = k ? spin(tris, k) : tris, a2 = k ? LP.analyzeLid(t2, face || 'auto') : a;
+        if (a2.topZ == null) return;
+        const ar = Math.max(a2.faces.top.area || 0, a2.faces.bottom.area || 0);
+        if (!best || ar > best.ar * 1.05) best = { t2, a2, ar };
+      });
+      if (best) { tris = best.t2; a = best.a2; }
+    }
+    if (a.topZ == null) for (const k of [1, 2]) {   // model may be lying on its side (Y-up or X-up files)
+      const t2 = spin(tris, k), a2 = LP.analyzeLid(t2, face || 'auto');
+      if (a2.topZ != null) { tris = t2; a = a2; break; }
+    }
     S.lidRaw = tris;
-    const a = LP.analyzeLid(tris, face || 'auto');
-    if (a.topZ == null) { status('No flat, upward-facing top surface was found in ' + name + '.', 'err'); return false; }
+    if (a.topZ == null) { status('No flat face was found in ' + name + '. The picture needs a flat surface to sit on.', 'err'); return false; }
     $('#face').value = a.flipped ? 'bottom' : 'top';
     a.id = 'lid' + ++uid; S.plateT = LP.plateThickness(a);
     S.lid = a; S.lidName = name; S.grid = null; S.cache = {}; S.edits = []; S.editBase = null; S.needBase = true;
@@ -3515,7 +3644,7 @@ if (typeof module !== 'undefined') module.exports = LP;
     // model
     $('#lidFile').addEventListener('change', async (e) => {
       const f = e.target.files[0]; if (!f) return;
-      try { setLid(LP.parseSTL(await f.arrayBuffer()), f.name); } catch (err) { status(err.message, 'err'); }
+      try { setLid(await readModel(f), f.name); } catch (err) { status(err.message || String(err), 'err'); }
       e.target.value = '';
     });
     $('#face').addEventListener('change', (e) => { if (S.lidRaw) setLid(S.lidRaw, S.lidName, e.target.value); });
