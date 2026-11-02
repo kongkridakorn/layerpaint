@@ -2469,6 +2469,8 @@ if (typeof module !== 'undefined') module.exports = LP;
     clearTimeout(tmr);
     tmr = setTimeout(exec, 60);
   }
+  const MAX_CELLS = 250000;   // keeps big models responsive: pixel size grows with the model
+  const effPx = () => { const b = S.lid && S.lid.bbox; return b ? Math.max(S.q.px, +Math.sqrt((b.w * b.h) / MAX_CELLS).toFixed(2)) : S.q.px; };
   const rimMm = () => (S.mode === 'inlay' ? Math.max(0.8, +(S.nozzle * 2).toFixed(2)) : 0);
   const depthCap = () => Math.max(0, +(S.plateT - Math.max(0.4, S.nozzle)).toFixed(2));
   const teOf = (p) => (S.mode === 'inlay' ? Math.min(p.thick, depthCap()) : p.thick);
@@ -2485,7 +2487,7 @@ if (typeof module !== 'undefined') module.exports = LP;
       if (lvl >= 3 || !S.P) processImg();
       if (lvl >= 2 || !S.grid) {
         S.grid = LP.buildGrid(S.lid, S.P, {
-          px: S.q.px, inset: S.q.inset, n: S.q.n, clean: S.q.clean, smooth: S.q.smooth, rim: rimMm(), sep: S.q.sep, hue: S.q.hue,
+          px: effPx(), inset: S.q.inset, n: S.q.n, clean: S.q.clean, smooth: S.q.smooth, rim: rimMm(), sep: S.q.sep, hue: S.q.hue,
           place: { scale: S.place.scale / 100, ox: S.place.ox, oy: S.place.oy, rot: S.place.rot, fill: S.place.fill },
         }, S.cache);
         syncPalette(S.grid.centers);
@@ -2796,9 +2798,10 @@ if (typeof module !== 'undefined') module.exports = LP;
     el.dataset.kind = n > MAXC ? 'err' : '';
   }
   function updateNozzleNote() {
-    $('#nozzleInfo').textContent = S.q.px < S.nozzle - 1e-9
+    const big = effPx() > S.q.px + 1e-9;
+    $('#nozzleInfo').textContent = (big ? 'Big model: pixel size raised to ' + effPx().toFixed(2) + ' mm so it stays fast. ' : '') + (effPx() < S.nozzle - 1e-9
       ? 'Pixels are smaller than the nozzle, so the finest lines will print slightly blurred.'
-      : 'Every pixel is at least one nozzle wide, so it can print cleanly.';
+      : 'Every pixel is at least one nozzle wide, so it can print cleanly.');
   }
 
   /* ---------- palette rows ---------- */
@@ -3292,7 +3295,9 @@ if (typeof module !== 'undefined') module.exports = LP;
   }
   function camPreset(kind) {
     const T = S.three; if (!T || !S.lid) return;
-    const b = S.lid.bbox, d = Math.max(b.w, b.h) * 2.1, cz = S.lid.topZ / 2;
+    const b = S.lid.bbox, L = S.lid, cz = (L.min[2] + L.max[2]) / 2;
+    const size = Math.max(b.w, b.h, L.max[2] - L.min[2]), d = size * 2.1;
+    T.camera.near = Math.max(0.01, size / 200); T.camera.far = size * 60; T.camera.updateProjectionMatrix();
     T.controls.target.set(b.cx, b.cy, cz);
     const pos = { iso: [b.cx, b.cy - d * 0.75, cz + d * 0.8], top: [b.cx, b.cy - 0.001, cz + d * 1.1], front: [b.cx, b.cy - d * 1.1, cz + d * 0.1] }[kind];
     T.camera.position.set(pos[0], pos[1], pos[2]);
