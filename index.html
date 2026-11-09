@@ -134,6 +134,9 @@ select { font-family: var(--font-body); }
 .crow input[type=number] { width: 72px; }
 @media (max-width: 420px) { .crow { grid-template-columns: 34px minmax(0, 1fr) 64px auto; } .crow .prt span { display: none; } .crow input[type=number] { width: 64px; } }
 .note { font-size: 12.5px; color: var(--muted); margin: 0; }
+#dropHint { position: fixed; inset: 10px; z-index: 50; display: none; align-items: center; justify-content: center; text-align: center; padding: 20px; border: 3px dashed var(--accent); border-radius: 16px; background: color-mix(in srgb, var(--bg) 88%, transparent); color: var(--ink); font: 600 20px var(--font-head); pointer-events: none; }
+#dropHint.on { display: flex; }
+#dropHint small { display: block; margin-top: 8px; font: 400 14px var(--font-body); color: var(--muted); }
 #slCv { position: absolute; inset: 0; width: 100%; height: 100%; }
 .slbar { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
 .slbar input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); margin: 0; }
@@ -155,7 +158,7 @@ select { font-family: var(--font-body); }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
 
-</head><body><div class="wrap">
+</head><body><div id="dropHint" aria-hidden="true"><div>Drop your file here<small>A 3D model (.stl) goes on the model, a picture (.png, .jpg, .webp) becomes the image</small></div></div><div class="wrap">
   <header class="hd">
     <h1>LayerPaint</h1>
     <p>Print any picture as stacked colour layers on top of a 3D model.</p>
@@ -3547,6 +3550,29 @@ if (typeof module !== 'undefined') module.exports = LP;
     $('#lidSampleOld').addEventListener('click', () => loadSampleLid('old'));
     $('#face').addEventListener('change', (e) => { if (S.lidRaw) setLid(S.lidRaw, S.lidName, e.target.value); });
     // image
+    // drag and drop: drop a model or a picture anywhere on the page
+    (function dropFiles() {
+      const hint = $('#dropHint');
+      let depth = 0;
+      const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+      window.addEventListener('dragenter', (e) => { if (!hasFiles(e)) return; e.preventDefault(); depth++; hint.classList.add('on'); });
+      window.addEventListener('dragover', (e) => { if (hasFiles(e)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } });
+      window.addEventListener('dragleave', (e) => { if (!hasFiles(e)) return; depth = Math.max(0, depth - 1); if (!depth) hint.classList.remove('on'); });
+      window.addEventListener('drop', async (e) => {
+        if (!hasFiles(e)) return;
+        e.preventDefault(); depth = 0; hint.classList.remove('on');
+        let did = false;
+        for (const f of Array.from(e.dataTransfer.files)) {
+          const ext = (f.name.split('.').pop() || '').toLowerCase();
+          if (ext === 'stl') {
+            try { setLid(LP.parseSTL(await f.arrayBuffer()), f.name); did = true; } catch (err) { status(err.message, 'err'); return; }
+          } else if (/^image\//.test(f.type) || ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext)) {
+            loadImgSrc(URL.createObjectURL(f), f.name, true); did = true;
+          }
+        }
+        if (!did) status('That file type is not supported. Drop an .stl model or a .png, .jpg or .webp picture.', 'err');
+      });
+    })();
     $('#imgFile').addEventListener('change', (e) => {
       const f = e.target.files[0]; if (!f) return;
       loadImgSrc(URL.createObjectURL(f), f.name, true); e.target.value = '';
